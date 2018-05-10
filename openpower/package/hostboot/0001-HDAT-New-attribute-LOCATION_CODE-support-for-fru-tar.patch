@@ -1,0 +1,145 @@
+From 40a400b34e9a964e0d57e78ed7ef52572ca9be64 Mon Sep 17 00:00:00 2001
+From: nagurram-in <nagendra.g@in.ibm.com>
+Date: Tue, 8 May 2018 05:45:05 -0500
+Subject: [PATCH] HDAT : New attribute LOCATION_CODE support for fru target
+ types
+
+Change-Id: I240ef739c4949140bfd5f5851ce5a8e8206030ae
+---
+ src/usr/hdat/hdatutil.C                            | 45 ++++++++++------------
+ src/usr/targeting/common/Targets.pm                |  4 ++
+ .../targeting/common/xmltohb/attribute_types.xml   | 12 ++++++
+ src/usr/targeting/common/xmltohb/target_types.xml  |  3 ++
+ 4 files changed, 39 insertions(+), 25 deletions(-)
+
+diff --git a/src/usr/hdat/hdatutil.C b/src/usr/hdat/hdatutil.C
+index 63b6a31..7f7f006 100644
+--- a/src/usr/hdat/hdatutil.C
++++ b/src/usr/hdat/hdatutil.C
+@@ -458,12 +458,16 @@ void hdatGetLocationCode(TARGETING::Target *i_pFruTarget,
+                                              char *o_locCode)
+ {
+     TARGETING::ATTR_PHYS_PATH_type l_physPath;
++    TARGETING::ATTR_LOCATION_CODE_type l_locationCode;
+     char *l_pPhysPath;
+     char l_locCode[64] = {0};
+-
+-//@TODO:RTC 149347: Add methods to generate location codes
+-
+-    if(i_pFruTarget->tryGetAttr<TARGETING::ATTR_PHYS_PATH>(l_physPath))
++    
++    
++    if(i_pFruTarget->tryGetAttr<TARGETING::ATTR_LOCATION_CODE>(l_locationCode))
++    {
++        sprintf(l_locCode, "%s-%s",i_locCodePrefix,l_locationCode);
++    }   
++    else if(i_pFruTarget->tryGetAttr<TARGETING::ATTR_PHYS_PATH>(l_physPath))
+     {
+         char *l_cutString;
+         char *l_suffix;
+@@ -480,31 +484,22 @@ void hdatGetLocationCode(TARGETING::Target *i_pFruTarget,
+             l_cutString = strchr(l_cutString+1, '/');
+         }
+ 
+-#if USE_PHYS_PATH_FOR_LOC_CODE
+-
+-        strncpy(l_hdatslcaentry.location_code,
+-        reinterpret_cast<const char *>
+-                    (i_Target->getAttr<TARGETING::ATTR_PHYS_PATH>().toString()),
+-                                         l_hdatslcaentry.max_location_code_len);
+-#else
+-
+         sprintf(l_locCode, "%s-%s",i_locCodePrefix,(l_suffix+1));
+-
+-        uint8_t l_index = 0;
+-        while(l_index < strlen(l_locCode))
+-        {
+-            if(l_locCode[l_index] != ' ')
+-            {
+-                *o_locCode++ = l_locCode[l_index];
+-            }
+-            l_index++;
+-        }
+-       // *o_locCode = 0;
+-#endif
+     }
+     else
+     {
+-        HDAT_ERR("Error accessing ATTR_PHYS_PATH attribute");
++        HDAT_ERR("Error accessing ATTR_PHYS_PATH or ATTR_LOCATION_CODE attribute");
++        return;
++    }
++
++    uint8_t l_index = 0;
++    while(l_index < strlen(l_locCode))
++    {
++        if(l_locCode[l_index] != ' ')
++        {
++            *o_locCode++ = l_locCode[l_index];
++        }
++        l_index++;
+     }
+ }
+ 
+diff --git a/src/usr/targeting/common/Targets.pm b/src/usr/targeting/common/Targets.pm
+index 4ad61ed..a61340f 100644
+--- a/src/usr/targeting/common/Targets.pm
++++ b/src/usr/targeting/common/Targets.pm
+@@ -1288,6 +1288,9 @@ sub processDimms
+             my $proc_target         = $self->getTargetParent($mcbist_target);
+             my $dimm_connector_tgt  = $self->getTargetParent($dimm);
+ 
++            #Get the loc code from connector and update to dimm targ
++            my $loc_code = $self->getAttribute($dimm_connector_tgt,"LOCATION_CODE");
++
+             my $mca     = $self->getAttribute($mca_target,       "CHIP_UNIT")%2;
+             my $mcs     = $self->getAttribute($mcs_target,       "CHIP_UNIT")%2;
+             my $mcbist  = $self->getAttribute($mcbist_target,    "CHIP_UNIT");
+@@ -1308,6 +1311,7 @@ sub processDimms
+             $self->setAttribute($dimm, "REL_POS", $port_num);
+             $self->setAttribute($dimm, "MBA_DIMM", $port_num); #which dimm
+             $self->setAttribute($dimm, "MBA_PORT", 0);  #0, each MCA is a port
++            $self->setAttribute($dimm, "LOCATION_CODE",$loc_code);
+ 
+             ## set all FAPI_POS
+             my $MCBIST_PER_CHIP = $self->{UNIT_COUNTS}->
+diff --git a/src/usr/targeting/common/xmltohb/attribute_types.xml b/src/usr/targeting/common/xmltohb/attribute_types.xml
+index da2244f..12d00be 100755
+--- a/src/usr/targeting/common/xmltohb/attribute_types.xml
++++ b/src/usr/targeting/common/xmltohb/attribute_types.xml
+@@ -130,6 +130,18 @@
+   </attribute>
+ 
+   <attribute>
++    <description>Location code of the Fru target</description>
++    <id>LOCATION_CODE</id>
++    <simpleType>
++      <string>
++        <sizeInclNull>64</sizeInclNull>
++      </string>
++    </simpleType>
++    <persistency>non-volatile</persistency>
++    <readable></readable>
++  </attribute>
++
++  <attribute>
+     <description>Physical hierarchical path to the target</description>
+     <id>PHYS_PATH</id>
+     <nativeType>
+diff --git a/src/usr/targeting/common/xmltohb/target_types.xml b/src/usr/targeting/common/xmltohb/target_types.xml
+index b187a4a..0682728 100644
+--- a/src/usr/targeting/common/xmltohb/target_types.xml
++++ b/src/usr/targeting/common/xmltohb/target_types.xml
+@@ -467,6 +467,9 @@
+     <default>CARD</default>
+     <id>CLASS</id>
+   </attribute>
++  <attribute>
++    <id>LOCATION_CODE</id>
++  </attribute>
+ </targetType>
+ 
+ <targetType>
+-- 
+1.8.2.2
+
