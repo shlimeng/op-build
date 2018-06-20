@@ -1,0 +1,327 @@
+From 91cfb6baf24aa0ecbfec6ef5c4de9c632f0814ac Mon Sep 17 00:00:00 2001
+From: Jeremy Kerr <jk@ozlabs.org>
+Date: Tue, 19 Jun 2018 18:27:43 +0800
+Subject: [PATCH] discover: implement a periodic requery for network devices
+
+If we boot a machine before external (network) dependencies are properly
+configured, it will have tried once to download configuration, and
+possibly failed due to that configuration not being present.
+
+This change introduces a periodic requery of network resources. After a
+timeout, petitboot will either re-acquire its DHCP lease (causing any
+downloads to be re-processed, possibly with different parameters from
+the new lease), or re-download a statically defined URL.
+
+This timeout defaults to five minutes (similar to pxelinux), and is
+configurable by DHCP option 211, "reboot time".
+
+Signed-off-by: Jeremy Kerr <jk@ozlabs.org>
+---
+ discover/device-handler.c | 130 ++++++++++++++++++++++++++++++++++++++++++++--
+ discover/device-handler.h |   4 ++
+ discover/network.c        |  46 ++++++++++++++++
+ discover/network.h        |   2 +
+ utils/pb-udhcpc           |   4 +-
+ 5 files changed, 180 insertions(+), 6 deletions(-)
+
+diff --git a/discover/device-handler.c b/discover/device-handler.c
+index 569e652..049301b 100644
+--- a/discover/device-handler.c
++++ b/discover/device-handler.c
+@@ -49,6 +49,8 @@ enum default_priority {
+ 	DEFAULT_PRIORITY_DISABLED	= 0xff,
+ };
+ 
++static int default_rescan_timeout = 5 * 60; /* seconds */
++
+ struct progress_info {
+ 	unsigned int			percentage;
+ 	unsigned long			size;		/* size in bytes */
+@@ -418,10 +420,13 @@ void device_handler_reinit(struct device_handler *handler)
+ 
+ 	/* drop all devices */
+ 	for (i = 0; i < handler->n_devices; i++) {
++		struct discover_device *device = handler->devices[i];
+ 		discover_server_notify_device_remove(handler->server,
+-				handler->devices[i]->device);
+-		ramdisk = handler->devices[i]->ramdisk;
+-		talloc_free(handler->devices[i]);
++				device->device);
++		ramdisk = device->ramdisk;
++		if (device->requery_waiter)
++			waiter_remove(device->requery_waiter);
++		talloc_free(device);
+ 		talloc_free(ramdisk);
+ 	}
+ 
+@@ -460,6 +465,9 @@ void device_handler_remove(struct device_handler *handler,
+ 	struct discover_boot_option *opt, *tmp;
+ 	unsigned int i;
+ 
++	if (device->requery_waiter)
++		waiter_remove(device->requery_waiter);
++
+ 	list_for_each_entry_safe(&device->boot_options, opt, tmp, list) {
+ 		if (opt == handler->default_boot_option) {
+ 			pb_log("Default option %s cancelled since device removed",
+@@ -699,7 +707,15 @@ void device_handler_status_download_remove(struct device_handler *handler,
+ 
+ static void device_handler_boot_status_cb(void *arg, struct status *status)
+ {
+-	device_handler_status(arg, status);
++	struct device_handler *handler = arg;
++
++	if (status->type == STATUS_ERROR) {
++		/* allow a new default if one is found later */
++		handler->pending_boot = NULL;
++		handler->default_boot_option = NULL;
++	}
++
++	device_handler_status(handler, status);
+ }
+ 
+ static void countdown_status(struct device_handler *handler,
+@@ -1162,6 +1178,109 @@ out:
+ 	return 0;
+ }
+ 
++struct requery_data {
++	struct device_handler	*handler;
++	struct discover_device	*device;
++};
++
++static int device_handler_requery_timeout_fn(void *data)
++{
++	struct discover_boot_option *opt, *tmp;
++	struct requery_data *rqd = data;
++	struct device_handler *handler;
++	struct discover_device *device;
++
++	handler = rqd->handler;
++	device = rqd->device;
++
++	talloc_free(rqd);
++
++	/* network_requery_device may re-add a timeout, so clear the device
++	 * waiter here, so we can potentially start a new one. */
++	device->requery_waiter = NULL;
++
++	/* We keep the device around, but get rid of the parsed boot
++	 * options on that device. That involves delaring out the lists,
++	 * and potentially cancelling a default.
++	 */
++	list_for_each_entry_safe(&handler->unresolved_boot_options,
++			opt, tmp, list) {
++		if (opt->device != device)
++			continue;
++		list_remove(&opt->list);
++		talloc_free(opt);
++	}
++
++	list_for_each_entry_safe(&device->boot_options, opt, tmp, list) {
++		if (opt == handler->default_boot_option) {
++			pb_log("Default option %s cancelled since device is being requeried",
++					opt->option->name);
++			device_handler_cancel_default(handler);
++		}
++		list_remove(&opt->list);
++		talloc_free(opt);
++	}
++
++	discover_server_notify_device_remove(handler->server, device->device);
++	device->notified = false;
++
++	network_requery_device(handler->network, device);
++
++	return 0;
++}
++
++/* Schedule a requery in timeout (seconds).
++ *
++ * Special values of timeout:
++ *   0: no requery
++ *  -1: use default
++ */
++void device_handler_start_requery_timeout( struct device_handler *handler,
++		struct discover_device *dev, int timeout)
++{
++	struct requery_data *rqd;
++
++	if (dev->requery_waiter)
++		return;
++
++	if (timeout == -1)
++		timeout = default_rescan_timeout;
++	else if (timeout == 0)
++		return;
++
++	rqd = talloc(dev, struct requery_data);
++	rqd->handler = handler;
++	rqd->device = dev;
++
++	pb_debug("starting requery timeout for device %s, in %d sec\n",
++			dev->device->id, timeout);
++
++	dev->requery_waiter = waiter_register_timeout(handler->waitset,
++			timeout * 1000, device_handler_requery_timeout_fn, rqd);
++}
++
++static int event_requery_timeout(struct event *event)
++{
++	int timeout = -1;
++	unsigned long x;
++	const char *str;
++	char *endp;
++
++	if (!event)
++		return timeout;
++
++	str = event_get_param(event, "reboottime");
++	if (!str)
++		return timeout;
++
++	x = strtoul(str, &endp, 0);
++	if (endp != str)
++		timeout = x;
++
++	return timeout;
++}
++
++
+ /* Incoming dhcp event */
+ int device_handler_dhcp(struct device_handler *handler,
+ 		struct discover_device *dev, struct event *event)
+@@ -1179,6 +1298,9 @@ int device_handler_dhcp(struct device_handler *handler,
+ 	talloc_steal(ctx, event);
+ 	ctx->event = event;
+ 
++	device_handler_start_requery_timeout(handler, dev,
++			event_requery_timeout(event));
++
+ 	iterate_parsers(ctx);
+ 
+ 	device_handler_discover_context_commit(handler, ctx);
+diff --git a/discover/device-handler.h b/discover/device-handler.h
+index 771cd06..427a94a 100644
+--- a/discover/device-handler.h
++++ b/discover/device-handler.h
+@@ -38,6 +38,8 @@ struct discover_device {
+ 
+ 	struct list		boot_options;
+ 	struct list		params;
++
++	struct waiter		*requery_waiter;
+ };
+ 
+ struct discover_boot_option {
+@@ -102,6 +104,8 @@ int device_handler_dhcp(struct device_handler *handler,
+ 		struct discover_device *dev, struct event *event);
+ void device_handler_remove(struct device_handler *handler,
+ 		struct discover_device *device);
++void device_handler_start_requery_timeout( struct device_handler *handler,
++		struct discover_device *dev, int timeout);
+ 
+ void device_handler_status(struct device_handler *handler,
+ 		struct status *status);
+diff --git a/discover/network.c b/discover/network.c
+index e2cae91..6457f9e 100644
+--- a/discover/network.c
++++ b/discover/network.c
+@@ -331,6 +331,7 @@ static void configure_interface_dhcp(struct network *network,
+ 		"-f",
+ 		"-O", "pxeconffile",
+ 		"-O", "pxepathprefix",
++		"-O", "reboottime",
+ 		"-p", pidfile,
+ 		"-i", interface->name,
+ 		"-x", id, /* [11,12] - dhcp client identifier */
+@@ -417,6 +418,8 @@ static void configure_interface_static(struct network *network,
+ 						interface->hwaddr,
+ 						sizeof(interface->hwaddr)),
+ 				config->static_config.address);
++		device_handler_start_requery_timeout(network->handler,
++				interface->dev, -1);
+ 	}
+ 
+ 	return;
+@@ -498,6 +501,49 @@ static void configure_interface(struct network *network,
+ 	interface->state = IFSTATE_CONFIGURED;
+ }
+ 
++void network_requery_device(struct network *network,
++		struct discover_device *dev)
++{
++	const struct interface_config *config;
++	struct interface *interface;
++
++	interface = find_interface_by_uuid(network, dev->uuid);
++	if (!interface)
++		return;
++
++	if (interface->udhcpc_process) {
++		interface->udhcpc_process->exit_cb = NULL;
++		interface->udhcpc_process->data = NULL;
++		process_stop_async(interface->udhcpc_process);
++		process_release(interface->udhcpc_process);
++	}
++
++	config = find_config_by_hwaddr(interface->hwaddr);
++
++	if (config && config->ignore)
++		return;
++
++	if (!config || config->method == CONFIG_METHOD_DHCP) {
++		/* Restart DHCP. Once we acquire a lease, we'll re-start
++		 * the requery timeout (based on any reboottime DHCP option)
++		 */
++		configure_interface_dhcp(network, interface);
++
++	} else if (config->method == CONFIG_METHOD_STATIC &&
++			config->static_config.url) {
++		/* Redownload statically-provided URL, and manually restart
++		 * requery timeout */
++		device_handler_process_url(network->handler,
++				config->static_config.url,
++				mac_bytes_to_string(interface->dev,
++						interface->hwaddr,
++						sizeof(interface->hwaddr)),
++				config->static_config.address);
++		device_handler_start_requery_timeout(network->handler,
++				dev, -1);
++	}
++}
++
+ static int network_handle_nlmsg(struct network *network, struct nlmsghdr *nlmsg)
+ {
+ 	bool have_ifaddr, have_ifname;
+diff --git a/discover/network.h b/discover/network.h
+index bf1f2de..0cea6f2 100644
+--- a/discover/network.h
++++ b/discover/network.h
+@@ -14,6 +14,8 @@ void network_register_device(struct network *network,
+ 		struct discover_device *dev);
+ void network_unregister_device(struct network *network,
+ 		struct discover_device *dev);
++void network_requery_device(struct network *network,
++		struct discover_device *dev);
+ 
+ uint8_t *find_mac_by_name(void *ctx, struct network *network,
+ 		const char *name);
+diff --git a/utils/pb-udhcpc b/utils/pb-udhcpc
+index 4495266..e73495d 100644
+--- a/utils/pb-udhcpc
++++ b/utils/pb-udhcpc
+@@ -18,8 +18,8 @@ pb_add () {
+ 	paramstr=''
+ 
+ 	# Collect relevant DHCP response parameters into $paramstr
+-	for name in pxeconffile pxepathprefix bootfile mac ip siaddr \
+-		serverid tftp
++	for name in pxeconffile pxepathprefix reboottime bootfile mac ip \
++	        siaddr serverid tftp
+ 	do
+ 		value=$(eval "echo \${$name}")
+ 		[ -n "$value" ] || continue;
+-- 
+2.14.1
+
