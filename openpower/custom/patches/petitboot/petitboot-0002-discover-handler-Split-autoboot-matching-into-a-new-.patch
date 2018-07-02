@@ -1,0 +1,63 @@
+From f3cc186b81dec386ecc79e8ef334bd4e101c5260 Mon Sep 17 00:00:00 2001
+From: Jeremy Kerr <jk@ozlabs.org>
+Date: Fri, 29 Jun 2018 14:13:48 +0800
+Subject: [PATCH 2/5] discover/handler: Split autoboot matching into a new
+ function
+
+A future change will want to match autoboot option settings, so abstract
+this into its own function.
+
+Signed-off-by: Jeremy Kerr <jk@ozlabs.org>
+---
+ discover/device-handler.c | 27 +++++++++++++++++----------
+ 1 file changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/discover/device-handler.c b/discover/device-handler.c
+index 20093a4..69c24ca 100644
+--- a/discover/device-handler.c
++++ b/discover/device-handler.c
+@@ -794,24 +794,31 @@ static bool ipmi_device_type_matches(enum ipmi_bootdev ipmi_type,
+ 	return false;
+ }
+ 
++static bool autoboot_option_matches(struct autoboot_option *opt,
++		struct discover_device *dev)
++{
++	if (opt->boot_type == BOOT_DEVICE_UUID)
++		if (!strcmp(opt->uuid, dev->uuid))
++			return true;
++
++	if (opt->boot_type == BOOT_DEVICE_TYPE)
++		if (opt->type == dev->device->type ||
++		    opt->type == DEVICE_TYPE_ANY)
++			return true;
++
++	return false;
++}
++
+ static int autoboot_option_priority(const struct config *config,
+ 				struct discover_boot_option *opt)
+ {
+-	enum device_type type = opt->device->device->type;
+-	const char *uuid = opt->device->uuid;
+ 	struct autoboot_option *auto_opt;
+ 	unsigned int i;
+ 
+ 	for (i = 0; i < config->n_autoboot_opts; i++) {
+ 		auto_opt = &config->autoboot_opts[i];
+-		if (auto_opt->boot_type == BOOT_DEVICE_UUID)
+-			if (!strcmp(auto_opt->uuid, uuid))
+-				return DEFAULT_PRIORITY_LOCAL_FIRST + i;
+-
+-		if (auto_opt->boot_type == BOOT_DEVICE_TYPE)
+-			if (auto_opt->type == type ||
+-			    auto_opt->type == DEVICE_TYPE_ANY)
+-				return DEFAULT_PRIORITY_LOCAL_FIRST + i;
++		if (autoboot_option_matches(auto_opt, opt->device))
++			return DEFAULT_PRIORITY_LOCAL_FIRST + i;
+ 	}
+ 
+ 	return -1;
+-- 
+2.14.1
+

@@ -1,0 +1,45 @@
+From 553f10b45e129bb76343785edfa467897d12eb42 Mon Sep 17 00:00:00 2001
+From: Jeremy Kerr <jk@ozlabs.org>
+Date: Fri, 29 Jun 2018 15:00:11 +0800
+Subject: [PATCH 4/5] ui/ncurses: Implement non-boot-cancelling keys
+
+Allow some keys to not cancel the default-boot process.
+
+For the moment, this is just the screen refresh (ctrl+L).
+
+Signed-off-by: Jeremy Kerr <jk@ozlabs.org>
+---
+ ui/ncurses/nc-cui.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/ui/ncurses/nc-cui.c b/ui/ncurses/nc-cui.c
+index 20a9048..fb0056f 100644
+--- a/ui/ncurses/nc-cui.c
++++ b/ui/ncurses/nc-cui.c
+@@ -523,6 +523,14 @@ struct nc_scr *cui_set_current(struct cui *cui, struct nc_scr *scr)
+ 	return old;
+ }
+ 
++static bool key_cancels_boot(int key)
++{
++	if (key == 0xc)
++		return false;
++
++	return true;
++}
++
+ static bool process_global_keys(struct cui *cui, int key)
+ {
+ 	switch (key) {
+@@ -578,7 +586,7 @@ static int cui_process_key(void *arg)
+ 			}
+ 		}
+ 
+-		if (!cui->has_input) {
++		if (!cui->has_input && key_cancels_boot(c)) {
+ 			cui->has_input = true;
+ 			if (cui->client) {
+ 				pb_log("UI input received (key = %d), aborting "
+-- 
+2.14.1
+

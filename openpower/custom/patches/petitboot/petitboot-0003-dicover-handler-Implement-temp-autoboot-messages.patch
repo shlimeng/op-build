@@ -1,0 +1,179 @@
+From cf2aef984be5256c37e92bd3b01d45d5c2456dbf Mon Sep 17 00:00:00 2001
+From: Jeremy Kerr <jk@ozlabs.org>
+Date: Fri, 29 Jun 2018 14:14:20 +0800
+Subject: [PATCH 3/5] dicover/handler: Implement temp autoboot messages
+
+Handle incoming requests for temporary autoboot settings.
+
+Signed-off-by: Jeremy Kerr <jk@ozlabs.org>
+---
+ discover/device-handler.c  | 70 +++++++++++++++++++++++++++++++++++++++-------
+ discover/device-handler.h  |  2 ++
+ discover/discover-server.c | 16 +++++++++++
+ 3 files changed, 78 insertions(+), 10 deletions(-)
+
+diff --git a/discover/device-handler.c b/discover/device-handler.c
+index 69c24ca..6524a62 100644
+--- a/discover/device-handler.c
++++ b/discover/device-handler.c
+@@ -43,8 +43,9 @@
+ #include "ipmi.h"
+ 
+ enum default_priority {
+-	DEFAULT_PRIORITY_REMOTE		= 1,
+-	DEFAULT_PRIORITY_LOCAL_FIRST	= 2,
++	DEFAULT_PRIORITY_TEMP_USER	= 1,
++	DEFAULT_PRIORITY_REMOTE		= 2,
++	DEFAULT_PRIORITY_LOCAL_FIRST	= 3,
+ 	DEFAULT_PRIORITY_LOCAL_LAST	= 0xfe,
+ 	DEFAULT_PRIORITY_DISABLED	= 0xff,
+ };
+@@ -77,6 +78,7 @@ struct device_handler {
+ 	struct waiter		*timeout_waiter;
+ 	bool			autoboot_enabled;
+ 	unsigned int		sec_to_boot;
++	struct autoboot_option	*temp_autoboot;
+ 
+ 	struct discover_boot_option *default_boot_option;
+ 	int			default_boot_option_priority;
+@@ -830,19 +832,30 @@ static int autoboot_option_priority(const struct config *config,
+  * for these options.
+  */
+ static enum default_priority default_option_priority(
++		struct device_handler *handler,
+ 		struct discover_boot_option *opt)
+ {
+ 	const struct config *config;
+ 
++	/* Temporary user-provided autoboot options have highest priority */
++	if (handler->temp_autoboot) {
++		if (autoboot_option_matches(handler->temp_autoboot,
++					opt->device))
++			return DEFAULT_PRIORITY_TEMP_USER;
++
++		pb_debug("handler: disabled default priority due to "
++				"temporary user override\n");
++		return DEFAULT_PRIORITY_DISABLED;
++	}
++
+ 	config = config_get();
+ 
+-	/* We give highest priority to IPMI-configured boot options. If
+-	 * we have an IPMI bootdev configuration set, then we don't allow
+-	 * any other defaults */
+-	if (config->ipmi_bootdev) {
+-		bool ipmi_match = ipmi_device_type_matches(config->ipmi_bootdev,
+-				opt->device->device->type);
+-		if (ipmi_match)
++	/* Next highest priority to IPMI-configured boot options. If we have an
++	 * IPMI bootdev configuration set, then we don't allow any other
++	 * defaults */
++	if (config->ipmi_bootdev) { bool ipmi_match =
++		ipmi_device_type_matches(config->ipmi_bootdev,
++				opt->device->device->type); if (ipmi_match)
+ 			return DEFAULT_PRIORITY_REMOTE;
+ 
+ 		pb_debug("handler: disabled default priority due to "
+@@ -878,7 +891,7 @@ static void set_default(struct device_handler *handler,
+ 
+ 	pb_debug("handler: new default option: %s\n", opt->option->id);
+ 
+-	new_prio = default_option_priority(opt);
++	new_prio = default_option_priority(handler, opt);
+ 
+ 	/* Anything outside our range prevents a default boot */
+ 	if (new_prio >= DEFAULT_PRIORITY_DISABLED)
+@@ -918,6 +931,43 @@ static void set_default(struct device_handler *handler,
+ 	default_timeout(handler);
+ }
+ 
++void device_handler_apply_temp_autoboot(struct device_handler *handler,
++		struct autoboot_option *opt)
++{
++	unsigned int i;
++
++	handler->temp_autoboot = talloc_steal(handler, opt);
++
++	if (!handler->autoboot_enabled)
++		return;
++
++	if (!handler->default_boot_option)
++		return;
++
++	if (autoboot_option_matches(opt, handler->default_boot_option->device))
++		return;
++
++	/* cancel the default, and rescan available options */
++	device_handler_cancel_default(handler);
++
++	handler->autoboot_enabled = true;
++
++	for (i = 0; i < handler->n_devices; i++) {
++		struct discover_device *dev = handler->devices[i];
++		struct discover_boot_option *boot_opt;
++
++		if (!autoboot_option_matches(opt, dev))
++			continue;
++
++		list_for_each_entry(&dev->boot_options, boot_opt, list) {
++			if (boot_opt->option->is_default) {
++				set_default(handler, boot_opt);
++				break;
++			}
++		}
++	}
++}
++
+ static bool resource_is_resolved(struct resource *res)
+ {
+ 	return !res || res->resolved;
+diff --git a/discover/device-handler.h b/discover/device-handler.h
+index 427a94a..3ca88e4 100644
+--- a/discover/device-handler.h
++++ b/discover/device-handler.h
+@@ -167,6 +167,8 @@ void device_handler_process_url(struct device_handler *handler,
+ void device_handler_install_plugin(struct device_handler *handler,
+ 		const char *plugin_file);
+ void device_handler_reinit(struct device_handler *handler);
++void device_handler_apply_temp_autoboot(struct device_handler *handler,
++		struct autoboot_option *opt);
+ 
+ int device_request_write(struct discover_device *dev, bool *release);
+ void device_release_write(struct discover_device *dev, bool release);
+diff --git a/discover/discover-server.c b/discover/discover-server.c
+index 814053d..3377fa6 100644
+--- a/discover/discover-server.c
++++ b/discover/discover-server.c
+@@ -247,6 +247,7 @@ static int write_config_message(struct discover_server *server,
+ 
+ static int discover_server_process_message(void *arg)
+ {
++	struct autoboot_option *autoboot_opt;
+ 	struct pb_protocol_message *message;
+ 	struct boot_command *boot_command;
+ 	struct client *client = arg;
+@@ -311,6 +312,21 @@ static int discover_server_process_message(void *arg)
+ 		device_handler_install_plugin(client->server->device_handler,
+ 				url);
+ 		break;
++
++	case PB_PROTOCOL_ACTION_TEMP_AUTOBOOT:
++		autoboot_opt = talloc_zero(client, struct autoboot_option);
++		rc = pb_protocol_deserialise_temp_autoboot(autoboot_opt,
++				message);
++		if (rc) {
++			pb_log("can't parse temporary autoboot message\n");
++			return 0;
++		}
++
++		device_handler_apply_temp_autoboot(
++				client->server->device_handler,
++				autoboot_opt);
++		break;
++
+ 	default:
+ 		pb_log("%s: invalid action %d\n", __func__, message->action);
+ 		return 0;
+-- 
+2.14.1
+

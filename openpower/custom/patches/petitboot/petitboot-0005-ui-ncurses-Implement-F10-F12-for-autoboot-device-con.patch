@@ -1,0 +1,235 @@
+From 17bc251c79dc2eb98731faebd8b6e414ad1c7a97 Mon Sep 17 00:00:00 2001
+From: Jeremy Kerr <jk@ozlabs.org>
+Date: Mon, 2 Jul 2018 13:48:12 +1000
+Subject: [PATCH 5/5] ui/ncurses: Implement F10-F12 for autoboot device control
+
+Add a few mappings to specify temporary autoboot settings:
+
+  F10: Only autoboot from disk
+  F11: Only autoboot from USB devices
+  F12: Only autoboot from network
+
+These use the new code to prevent cancelling autoboot.
+
+Signed-off-by: Jeremy Kerr <jk@ozlabs.org>
+---
+ discover/device-handler.c   | 25 +++++++++++++++++++++
+ ui/common/discover-client.c | 18 +++++++++++++++
+ ui/common/discover-client.h |  4 ++++
+ ui/ncurses/nc-cui-help.c    |  9 ++++++++
+ ui/ncurses/nc-cui.c         | 55 +++++++++++++++++++++++++++++++++++++++++++++
+ ui/ncurses/nc-cui.h         |  1 +
+ 6 files changed, 112 insertions(+)
+
+diff --git a/discover/device-handler.c b/discover/device-handler.c
+index 6524a62..5ded5b4 100644
+--- a/discover/device-handler.c
++++ b/discover/device-handler.c
+@@ -931,13 +931,38 @@ static void set_default(struct device_handler *handler,
+ 	default_timeout(handler);
+ }
+ 
++static char *autoboot_option_desc(void *ctx, const struct autoboot_option *opt)
++{
++	const char *type, *val;
++
++	if (opt->boot_type == BOOT_DEVICE_TYPE) {
++		type = _("device type");
++		val = device_type_display_name(opt->type);
++	} else if (opt->boot_type == BOOT_DEVICE_UUID) {
++		type = _("device UUID");
++		val = opt->uuid;
++	} else {
++		type = _("unknown specifier");
++		val = NULL;
++	}
++
++	return talloc_asprintf(ctx, "%s = %s", type, val);
++}
++
+ void device_handler_apply_temp_autoboot(struct device_handler *handler,
+ 		struct autoboot_option *opt)
+ {
+ 	unsigned int i;
++	char *desc;
+ 
+ 	handler->temp_autoboot = talloc_steal(handler, opt);
+ 
++	desc = autoboot_option_desc(handler, opt);
++	device_handler_status_info(handler,
++			_("Applying temporary autoboot override: %s"),
++			desc);
++	talloc_free(desc);
++
+ 	if (!handler->autoboot_enabled)
+ 		return;
+ 
+diff --git a/ui/common/discover-client.c b/ui/common/discover-client.c
+index 784154e..88d0b4e 100644
+--- a/ui/common/discover-client.c
++++ b/ui/common/discover-client.c
+@@ -453,3 +453,21 @@ int discover_client_send_plugin_install(struct discover_client *client,
+ 
+ 	return pb_protocol_write_message(client->fd, message);
+ }
++
++int discover_client_send_temp_autoboot(struct discover_client *client,
++		const struct autoboot_option *opt)
++{
++	struct pb_protocol_message *message;
++	int len;
++
++	len = pb_protocol_temp_autoboot_len(opt);
++
++	message = pb_protocol_create_message(client,
++			PB_PROTOCOL_ACTION_TEMP_AUTOBOOT, len);
++	if (!message)
++		return -1;
++
++	pb_protocol_serialise_temp_autoboot(opt, message->payload, len);
++
++	return pb_protocol_write_message(client->fd, message);
++}
+diff --git a/ui/common/discover-client.h b/ui/common/discover-client.h
+index 7224691..2a2ea28 100644
+--- a/ui/common/discover-client.h
++++ b/ui/common/discover-client.h
+@@ -102,4 +102,8 @@ int discover_client_send_url(struct discover_client *client, char *url);
+ int discover_client_send_plugin_install(struct discover_client *client,
+ 		char *file);
+ 
++/* send a temporary autoboot override */
++int discover_client_send_temp_autoboot(struct discover_client *client,
++		const struct autoboot_option *opt);
++
+ #endif
+diff --git a/ui/ncurses/nc-cui-help.c b/ui/ncurses/nc-cui-help.c
+index 7d97ba5..0e57b77 100644
+--- a/ui/ncurses/nc-cui-help.c
++++ b/ui/ncurses/nc-cui-help.c
+@@ -26,5 +26,14 @@ option.\n\
+ To retreive new boot options from a remote configuration file, select \
+ the 'Retrieve config from URL' option.\n\
+ \n\
++To restrict petitboot to only autobooting from a specific device type, the \
++following keys are available:\n\
++\n\
++  F10: Only autoboot from disk\n\
++  F11: Only autoboot from USB devices\n\
++  F12: Only autoboot from network\n\
++\n\
++Unlike other keys, these do not cancel automatic boot.\n\
++\n\
+ To close the Petitboot interface, type X (exit).\n"
+ );
+diff --git a/ui/ncurses/nc-cui.c b/ui/ncurses/nc-cui.c
+index fb0056f..2b28418 100644
+--- a/ui/ncurses/nc-cui.c
++++ b/ui/ncurses/nc-cui.c
+@@ -59,6 +59,27 @@ static struct pmenu *plugin_menu_init(struct cui *cui);
+ 
+ static void cui_cancel_autoboot_on_exit(struct cui *cui);
+ 
++static struct {
++	int key;
++	struct autoboot_option opt;
++} autoboot_override_keys[] = {
++	{ KEY_F(10), {
++			.boot_type = BOOT_DEVICE_TYPE,
++			.type = DEVICE_TYPE_DISK,
++		},
++	},
++	{ KEY_F(11), {
++			.boot_type = BOOT_DEVICE_TYPE,
++			.type = DEVICE_TYPE_USB,
++		},
++	},
++	{ KEY_F(12), {
++			.boot_type = BOOT_DEVICE_TYPE,
++			.type = DEVICE_TYPE_NETWORK,
++		},
++	},
++};
++
+ static bool lockdown_active(void)
+ {
+ 	bool lockdown = false;
+@@ -523,22 +544,50 @@ struct nc_scr *cui_set_current(struct cui *cui, struct nc_scr *scr)
+ 	return old;
+ }
+ 
++static bool set_temp_autoboot_opt(struct cui *cui, struct autoboot_option *opt)
++{
++	cui->autoboot_opt = opt;
++	if (cui->client)
++		discover_client_send_temp_autoboot(cui->client, opt);
++
++	return true;
++}
++
+ static bool key_cancels_boot(int key)
+ {
++	unsigned int i;
++
+ 	if (key == 0xc)
+ 		return false;
+ 
++	for (i = 0; i < ARRAY_SIZE(autoboot_override_keys); i++)
++		if (key == autoboot_override_keys[i].key)
++			return false;
++
+ 	return true;
+ }
+ 
+ static bool process_global_keys(struct cui *cui, int key)
+ {
++	unsigned int i;
++
+ 	switch (key) {
+ 	case 0xc:
+ 		if (cui->current && cui->current->main_ncw)
+ 			wrefresh(curscr);
+ 		return true;
+ 	}
++
++	/* check for autoboot override keys */
++	for (i = 0; i < ARRAY_SIZE(autoboot_override_keys); i++) {
++		if (key != autoboot_override_keys[i].key)
++			continue;
++
++		pb_log("Sending temporary autoboot override\n");
++		set_temp_autoboot_opt(cui, &autoboot_override_keys[i].opt);
++		return true;
++	}
++
+ 	return false;
+ }
+ 
+@@ -1424,6 +1473,12 @@ static int cui_server_wait(void *arg)
+ 			pb_log("Aborting default boot on pb-discover connect\n");
+ 			discover_client_cancel_default(cui->client);
+ 		}
++
++		if (cui->autoboot_opt) {
++			pb_log("Sending autoboot override on pb-discover connect\n");
++			discover_client_send_temp_autoboot(cui->client,
++					cui->autoboot_opt);
++		}
+ 	}
+ 
+ 	return 0;
+diff --git a/ui/ncurses/nc-cui.h b/ui/ncurses/nc-cui.h
+index b310f4a..4997f4b 100644
+--- a/ui/ncurses/nc-cui.h
++++ b/ui/ncurses/nc-cui.h
+@@ -52,6 +52,7 @@ struct cui_opt_data {
+ struct cui {
+ 	enum pb_nc_sig c_sig;
+ 	bool has_input;
++	struct autoboot_option *autoboot_opt;
+ 	sig_atomic_t abort;
+ 	sig_atomic_t resize;
+ 	struct nc_scr *current;
+-- 
+2.14.1
+
