@@ -1,0 +1,34 @@
+From 0d8a9bb8567b39a6440b212b4eacbea0166ada51 Mon Sep 17 00:00:00 2001
+From: Vasant Hegde <hegdevasant@linux.vnet.ibm.com>
+Date: Sun, 6 May 2018 23:01:04 +0530
+Subject: [PATCH 2/2] vpd: Add default vendor name
+
+Signed-off-by: Vasant Hegde <hegdevasant@linux.vnet.ibm.com>
+---
+ hdata/spira.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/hdata/spira.c b/hdata/spira.c
+index 20879ee..7568db9 100644
+--- a/hdata/spira.c
++++ b/hdata/spira.c
+@@ -545,10 +545,15 @@ static bool add_xscom_sppcrd(uint64_t xscom_base)
+ 		/* Add chip VPD */
+ 		vpd_node = dt_add_vpd_node(hdif, SPPCRD_IDATA_FRU_ID,
+ 					   SPPCRD_IDATA_KW_VPD);
+-		if (vpd_node)
++		if (vpd_node) {
+ 			dt_add_property_cells(vpd_node, "ibm,chip-id",
+ 					      be32_to_cpu(cinfo->xscom_id));
+ 
++			/* Add default vendor name */
++			if (!dt_find_property(vpd_node, "vendor"))
++				dt_add_property_string(vpd_node, "vendor", "IBM");
++		}
++
+ 		fru_id = HDIF_get_idata(hdif, SPPCRD_IDATA_FRU_ID, NULL);
+ 		if (fru_id)
+ 			slca_vpd_add_loc_code(np, be16_to_cpu(fru_id->slca_index));
+-- 
+2.7.4
+
