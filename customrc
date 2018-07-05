@@ -1,0 +1,4 @@
+ #!/bin/sh
+    export OPBUILD_VENDOR=IBM-AE
+    export OPBUILD_PLATFORM=plat-romulus
+    export OPBUILD_VERSION=v2.1-rc1
