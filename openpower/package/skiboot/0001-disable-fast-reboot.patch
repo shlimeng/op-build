@@ -1,0 +1,24 @@
+From a63bc407cebcb4f5dd5a2c48eb74afd6387bc143 Mon Sep 17 00:00:00 2001
+From: Meng Li <shlimeng@cn.ibm.com>
+Date: Thu, 5 Jul 2018 13:43:00 +0800
+Subject: [PATCH] disable fast-reboot
+
+---
+ core/platform.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/core/platform.c b/core/platform.c
+index 3282227c..7bfa066e 100644
+--- a/core/platform.c
++++ b/core/platform.c
+@@ -62,7 +62,6 @@ static int64_t opal_cec_reboot(void)
+ 
+ 	/* Try fast-reset unless explicitly disabled */
+ 	if (!nvram_query_eq("fast-reset","0"))
+-		fast_reboot();
+ 
+ 	if (platform.cec_reboot)
+ 		return platform.cec_reboot();
+-- 
+2.11.0
+
