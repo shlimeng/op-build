@@ -1,0 +1,25 @@
+From 75c8b5d01f1b15a74bae17866c4481bf63011b93 Mon Sep 17 00:00:00 2001
+From: Meng Li <shlimeng@cn.ibm.com>
+Date: Thu, 5 Jul 2018 13:46:48 +0800
+Subject: [PATCH] change default system vendor name to IPCS
+
+---
+ hdata/spira.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hdata/spira.c b/hdata/spira.c
+index c820c4da..824eccb4 100644
+--- a/hdata/spira.c
++++ b/hdata/spira.c
+@@ -1060,7 +1060,7 @@ static void add_iplparams_sys_params(const void *iplp, struct dt_node *node)
+ 
+ 	/* Workaround a bug where we have NULL vendor */
+ 	if (!vendor || vendor[0] == '\0')
+-		vendor = "IBM";
++		vendor = "IPCS";
+ 
+ 	dt_add_property_string(dt_root, "vendor", vendor);
+ 
+-- 
+2.11.0
+
