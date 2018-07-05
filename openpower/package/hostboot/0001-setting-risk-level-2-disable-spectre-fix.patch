@@ -1,0 +1,42 @@
+From 0edb14768371812641d12d94ef38b769abbdfe97 Mon Sep 17 00:00:00 2001
+From: Meng Li <shlimeng@cn.ibm.com>
+Date: Thu, 5 Jul 2018 13:59:34 +0800
+Subject: [PATCH] setting risk level 2, disable spectre fix
+
+---
+ src/usr/targeting/targetservicestart.C | 19 +------------------
+ 1 file changed, 1 insertion(+), 18 deletions(-)
+
+diff --git a/src/usr/targeting/targetservicestart.C b/src/usr/targeting/targetservicestart.C
+index 5b7e639dd..07cb09316 100755
+--- a/src/usr/targeting/targetservicestart.C
++++ b/src/usr/targeting/targetservicestart.C
+@@ -427,24 +427,7 @@ static void initializeAttributes(TargetService& i_targetService,
+             //Set the RISK_LEVEL ATTR based off of master Scratch regs
+             // Risk Level is a 4 bit value that is treated as an integer, but
+             //  there is a legacy mode that we need to maintain support for
+-            ATTR_RISK_LEVEL_type l_riskLevel = 0;
+-
+-            // Scratch5:bit2 is legacy risk level bit for backward compatibility
+-            INITSERVICE::SPLESS::MboxScratch5_t l_scratch5;
+-            l_scratch5.data32 =
+-              i_masterScratch[INITSERVICE::SPLESS::SCRATCH_5];
+-            if( l_scratch5.oldRiskLevel )
+-            {
+-                l_riskLevel = 1;
+-            }
+-            // Scratch3 has the real risk level
+-            else
+-            {
+-                INITSERVICE::SPLESS::MboxScratch3_t l_scratch3;
+-                l_scratch3.data32 =
+-                  i_masterScratch[INITSERVICE::SPLESS::SCRATCH_3];
+-                l_riskLevel = l_scratch3.riskLevel;
+-            }
++            ATTR_RISK_LEVEL_type l_riskLevel = 2;
+             TARG_INF( "Setting RISK_LEVEL=%d", l_riskLevel );
+             l_pTopLevel->setAttr<ATTR_RISK_LEVEL>(l_riskLevel);
+         }
+-- 
+2.11.0
+
