@@ -1,0 +1,86 @@
+From 0d282ca2152e87d0a7b691a2a6c8c7b9b3a6163c Mon Sep 17 00:00:00 2001
+From: Nick Klazynski <jklazyns@us.ibm.com>
+Date: Fri, 13 Jul 2018 10:50:59 -0500
+Subject: [PATCH] If a running thread receives an sreset request, issue a stop first
+
+Change-Id: Ie8e6be0440fc032231ccf54b43614cceddeddae3
+---
+
+diff --git a/src/import/chips/p9/procedures/hwp/core/p9_thread_control.C b/src/import/chips/p9/procedures/hwp/core/p9_thread_control.C
+index 35c83bf..4ac9862 100644
+--- a/src/import/chips/p9/procedures/hwp/core/p9_thread_control.C
++++ b/src/import/chips/p9/procedures/hwp/core/p9_thread_control.C
+@@ -5,7 +5,7 @@
+ /*                                                                        */
+ /* OpenPOWER sbe Project                                                  */
+ /*                                                                        */
+-/* Contributors Listed Below - COPYRIGHT 2015,2017                        */
++/* Contributors Listed Below - COPYRIGHT 2015,2018                        */
+ /* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+@@ -105,6 +105,30 @@
+     const uint8_t i_threads,
+     fapi2::buffer<uint64_t>& o_rasStatusReg,
+     uint64_t& o_state);
++
++//--------------------------------------------------------------------------
++/// @brief threads_running : static funtion to encapsulate the running state
++/// @param[in] i_target core target
++/// @param[in] i_threads normal core thread bitset (0b0000..0b1111)
++/// @param[out] o_rasStatusReg  Complete RAS status reg 64-bit buffer.
++/// @param[out] o_ok true if the threads are quiesced
++/// @return FAPI2_RC_SUCCESS if the underlying hw operations succeeded
++//--------------------------------------------------------------------------
++static inline fapi2::ReturnCode threads_running(
++    const fapi2::Target<TARGET_TYPE_CORE>& i_target,
++    const uint8_t i_threads,
++    fapi2::buffer<uint64_t>& o_rasStatusReg,
++    bool& o_ok)
++{
++    uint64_t l_state = 0;
++    FAPI_TRY(p9_thread_control_query(i_target, i_threads, o_rasStatusReg, l_state),
++             "threads_running(): p9_thread_control_query() returns an error.");
++    o_ok = (!(l_state & THREAD_STATE_QUIESCED) &&
++            !(l_state & THREAD_STATE_MAINT));
++
++fapi_try_exit:
++    return fapi2::current_err;
++}
+ 
+ //--------------------------------------------------------------------------
+ /// @brief threads_in_maint : static funtion to encapsulate the maint state
+@@ -386,6 +410,24 @@
+              i_threads);
+ 
+     // No Precondition for Sreset; power management is handled by platform
++
++    // If the threads are running, they must be stopped first, before an SRESET
++    // can be issued
++    {
++        bool l_running = false;
++        FAPI_TRY(threads_running(i_target, i_threads, o_rasStatusReg, l_running),
++                 "p9_thread_control_sreset : unable to determine if threads are "
++                 "running. threads: 0x%x", i_threads);
++
++        if (l_running == true)
++        {
++            FAPI_INF("p9_thread_control_sreset : SRESET request on running threads; issuing stop for threads 0x%x",
++                     i_threads);
++            FAPI_TRY(p9_thread_control_stop(i_target, i_threads, i_warncheck,
++                                            o_rasStatusReg));
++        }
++    }
++
+     // Clear blocking interrupts
+     {
+         fapi2::buffer<uint64_t> l_mode_data;
+@@ -398,7 +440,7 @@
+         //         "ras_modreg for threads 0x%x", i_threads);
+         // l_mode_data.clearBit<C_RAS_MODEREG_MR_FENCE_INTERRUPTS>();
+         FAPI_TRY(fapi2::putScom(i_target, C_RAS_MODEREG, l_mode_data),
+-                 "p9_thread_control_step: putScom error when issuing "
++                 "p9_thread_control_sreset : putScom error when issuing "
+                  "ras_modreg step mode for threads 0x%x", i_threads);
+     }
+ 

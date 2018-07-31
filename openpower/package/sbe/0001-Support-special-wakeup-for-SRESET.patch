@@ -1,0 +1,277 @@
+From a8ae4fab627aa8d37202c7807f9eaa848242925a Mon Sep 17 00:00:00 2001
+From: spashabk-in <shakeebbk@in.ibm.com>
+Date: Fri, 20 Jul 2018 08:17:20 -0500
+Subject: [PATCH] Support special wakeup for SRESET
+
+Introduce new mode in stop instruction to assert special wakeup
+and deassert it
+
+Change-Id: Ie0648040b4c8b120468c4d03748a91f3ec78a06a
+Reviewed-on: http://rchgit01.rchland.ibm.com/gerrit1/63026
+Tested-by: Jenkins Server <pfd-jenkins+hostboot@us.ibm.com>
+Reviewed-by: RAJA DAS <rajadas2@in.ibm.com>
+Reviewed-by: Sachin Gupta <sgupta2m@in.ibm.com>
+---
+ src/sbefw/app/power/sbecmdcntlinst.C | 151 ++++++++++++++++++++++++++++++++++-
+ src/sbefw/core/sbeSpMsg.H            |  11 ++-
+ src/sbefw/core/sbe_sp_intf.H         |   7 +-
+ 3 files changed, 162 insertions(+), 7 deletions(-)
+
+diff --git a/src/sbefw/app/power/sbecmdcntlinst.C b/src/sbefw/app/power/sbecmdcntlinst.C
+index d6958eca..7f05bc31 100644
+--- a/src/sbefw/app/power/sbecmdcntlinst.C
++++ b/src/sbefw/app/power/sbecmdcntlinst.C
+@@ -6,6 +6,7 @@
+ /* OpenPOWER sbe Project                                                  */
+ /*                                                                        */
+ /* Contributors Listed Below - COPYRIGHT 2016,2018                        */
++/* [+] International Business Machines Corp.                              */
+ /*                                                                        */
+ /*                                                                        */
+ /* Licensed under the Apache License, Version 2.0 (the "License");        */
+@@ -64,13 +65,102 @@ ThreadCommands getThreadCommand(const sbeCntlInstRegMsgHdr_t & i_req)
+ inline bool getWarnCheckFlag(const sbeCntlInstRegMsgHdr_t & i_req)
+ {
+     bool l_warnCheck = false;
+-    if( EXIT_ON_FIRST_ERROR != i_req.mode )
++
++    // EXIT_ON_FIRST_ERROR and IGNORE_HW_ERRORS are mutually exclusive
++    if( EXIT_ON_FIRST_ERROR != (i_req.mode & 0x1) )
+     {
+         l_warnCheck = true;
+     }
+     return l_warnCheck;
+ }
+ 
++static const uint64_t SGPE_ACTIVE = 0x0080000000000000ull;
++static const uint64_t SPWKUP_ASSERT   = 0x1000000000000000ull;
++static const uint64_t SPWKUP_DEASSERT = 0x0000000000000000ull;
++static const uint64_t GPMMR_SPWKUP_DONE = 0x1000000000000000ull;
++static const uint32_t SPECIAL_WAKE_UP_POLL_INTERVAL_NS = 1000000;   //1ms
++static const uint32_t SPECIAL_WAKE_UP_POLL_INTERVAL_SIMICS = 1000000;
++static const uint32_t SPECIAL_WAKEUP_TIMEOUT_COUNT = 100; // 100 * 1ms
++
++static uint32_t specialWakeUpCoreAssert(
++        const Target<TARGET_TYPE_CORE>& i_target, ReturnCode &o_fapiRc)
++{
++    #define SBE_FUNC "specialWakeUpCoreAssert"
++    uint32_t rc = SBE_SEC_OPERATION_SUCCESSFUL;
++    o_fapiRc = FAPI2_RC_SUCCESS;
++
++    do
++    {
++        uint64_t data = 0;
++        uint8_t pollCount = 0;
++
++        data = SPWKUP_ASSERT; // assert
++        o_fapiRc = putscom_abs_wrap(&i_target, C_PPM_SPWKUP_FSP, data);
++        if(o_fapiRc != FAPI2_RC_SUCCESS)
++        {
++            SBE_ERROR(SBE_FUNC " special wakeup putscom failed");
++            rc = SBE_SEC_SPECIAL_WAKEUP_SCOM_FAILURE;
++            break;
++        }
++
++        do
++        {
++            delay(SPECIAL_WAKE_UP_POLL_INTERVAL_NS, SPECIAL_WAKE_UP_POLL_INTERVAL_SIMICS);
++            o_fapiRc = getscom_abs_wrap(&i_target, C_PPM_GPMMR_SCOM, &data);
++            if(o_fapiRc != FAPI2_RC_SUCCESS)
++            {
++                rc = SBE_SEC_SPECIAL_WAKEUP_SCOM_FAILURE;
++                break;
++            }
++        }
++        while(!(data & GPMMR_SPWKUP_DONE) &&
++                (++pollCount < SPECIAL_WAKEUP_TIMEOUT_COUNT));
++
++        if(!(data & GPMMR_SPWKUP_DONE))
++        {
++            if(rc == SBE_SEC_OPERATION_SUCCESSFUL) {
++                SBE_ERROR(SBE_FUNC " special wakeup done timeout");
++                rc = SBE_SEC_SPECIAL_WAKEUP_TIMEOUT;
++            }
++            break;
++        }
++    } while(false);
++
++    return rc;
++    #undef SBE_FUNC
++}
++static uint32_t specialWakeUpCoreDeAssert(
++        const Target<TARGET_TYPE_CORE>& i_target, ReturnCode &o_fapiRc)
++{
++    #define SBE_FUNC "specialWakeUpCoreDeAssert"
++    uint32_t rc = SBE_SEC_OPERATION_SUCCESSFUL;
++    o_fapiRc = FAPI2_RC_SUCCESS;
++
++    do
++    {
++        uint64_t data = SPWKUP_DEASSERT; // deassert
++        o_fapiRc = putscom_abs_wrap(&i_target, C_PPM_SPWKUP_FSP, data);
++        if(o_fapiRc != FAPI2_RC_SUCCESS)
++        {
++            SBE_ERROR(SBE_FUNC " special wakeup putscom failed");
++            rc = SBE_SEC_SPECIAL_WAKEUP_SCOM_FAILURE;
++            break;
++        }
++
++        // This puts an inherent delay in the propagation of the reset transition.
++        o_fapiRc = getscom_abs_wrap(&i_target, C_PPM_SPWKUP_FSP, &data);
++        if(o_fapiRc != FAPI2_RC_SUCCESS)
++        {
++            SBE_ERROR(SBE_FUNC " special wakeup getscom failed");
++            rc = SBE_SEC_SPECIAL_WAKEUP_SCOM_FAILURE;
++            break;
++        }
++    } while(false);
++
++    return rc;
++    #undef SBE_FUNC
++}
++
+ ///////////////////////////////////////////////////////////////////////
+ // @brief sbeCntlInst Sbe control instructions function
+ //
+@@ -138,6 +228,33 @@ uint32_t sbeCntlInst(uint8_t *i_pArg)
+                 continue;
+             }
+ 
++            bool deassertRequired = false;
++            if(l_req.isSpecialWakeUpRequired())
++            {
++                l_rc = specialWakeUpCoreAssert(l_coreTgt, l_fapiRc);
++                if(l_rc != SBE_SEC_OPERATION_SUCCESSFUL)
++                {
++                    SBE_ERROR(SBE_FUNC "Special Wakeup Assert failed for core[0x%2x]",
++                                                 (uint8_t)l_req.coreChipletId);
++                    l_respHdr.setStatus(SBE_PRI_GENERIC_EXECUTION_FAILURE,
++                                        l_rc);
++                    l_rc = SBE_SEC_OPERATION_SUCCESSFUL;
++                    l_ffdc.setRc(l_fapiRc);
++                    if(!(IGNORE_HW_ERRORS & l_req.mode))
++                    {
++                        break;
++                    }
++                    SBE_INFO(SBE_FUNC "Continuing in case of HW Errors"
++                        " As user has passed to ignore errors.");
++                }
++                else
++                {
++                    SBE_INFO(SBE_FUNC "Special Wakeup assert succeeded for core[0x%2x]",
++                                                     (uint8_t)l_req.coreChipletId);
++                    deassertRequired = true;
++                }
++            }
++
+             uint8_t l_thread = l_threadCnt;
+             do
+             {
+@@ -154,7 +271,7 @@ uint32_t sbeCntlInst(uint8_t *i_pArg)
+                     SBE_ERROR(SBE_FUNC "Failed for Core[%d] Thread [%d] "
+                         "Cmd[%d] Mode[%d]", l_core, l_thread, l_req.threadOps,
+                         l_req.mode);
+-                    if(IGNORE_HW_ERRORS == l_req.mode)
++                    if(IGNORE_HW_ERRORS & l_req.mode)
+                     {
+                         // No need to delete the l_fapiRc handle,it will get
+                         // over-written
+@@ -174,9 +291,35 @@ uint32_t sbeCntlInst(uint8_t *i_pArg)
+                 }
+             }while(++l_thread < l_threadCntMax);
+ 
+-            // If FapiRc from the inner loop (thread loop), just break here
+-            if ((l_fapiRc) && (IGNORE_HW_ERRORS != l_req.mode))
++            if(deassertRequired)
++            {
++                ReturnCode fapiRc = FAPI2_RC_SUCCESS;
++                l_rc = specialWakeUpCoreDeAssert(l_coreTgt, fapiRc);
++                if(l_rc != SBE_SEC_OPERATION_SUCCESSFUL)
++                {
++                    SBE_ERROR(SBE_FUNC "Special Wakeup de-asssert failed for core[0x%2x]",
++                                                 (uint8_t)l_req.coreChipletId);
++                    l_respHdr.setStatus(SBE_PRI_GENERIC_EXECUTION_FAILURE,
++                                        l_rc);
++                    l_rc = SBE_SEC_OPERATION_SUCCESSFUL;
++                    l_ffdc.setRc(fapiRc);
++                    if(!(IGNORE_HW_ERRORS & l_req.mode))
++                    {
++                        break;
++                    }
++                    SBE_INFO(SBE_FUNC "Continuing in case of HW Errors"
++                        " As user has passed to ignore errors.");
++                }
++                else
++                {
++                    SBE_INFO(SBE_FUNC "Special Wakeup de-assert succeeded for core[0x%2x]",
++                                                     (uint8_t)l_req.coreChipletId);
++                }
++            }
++
++            if ((l_fapiRc) && !(IGNORE_HW_ERRORS & l_req.mode))
+             {
++                // If FapiRc from the inner loop (thread loop), just break here
+                 break; // From core while loop
+             }
+         }while(++l_core < l_coreCntMax);
+diff --git a/src/sbefw/core/sbeSpMsg.H b/src/sbefw/core/sbeSpMsg.H
+index e2499234..ecd99b0d 100644
+--- a/src/sbefw/core/sbeSpMsg.H
++++ b/src/sbefw/core/sbeSpMsg.H
+@@ -589,7 +589,6 @@ typedef struct
+         bool l_validatePassFlag = true;
+         // Validate Thread Command / Thread Num / Error Mode
+         if((threadOps > THREAD_SRESET_INS) ||
+-           (mode > IGNORE_HW_ERRORS) ||
+            !((threadNum <= SMT4_THREAD3) || (threadNum == SMT4_THREAD_ALL)))
+         {
+             SBE_ERROR(SBE_FUNC "Invalid Parameter by User, ThreadOps[%d] "
+@@ -632,6 +631,16 @@ typedef struct
+             o_threadCntMax = threadNum;
+         }
+     }
++
++    /**
++     * @brief Special wakeup required for this request
++     *
++     * @return true if required, else false
++     */
++    bool isSpecialWakeUpRequired()
++    {
++        return (mode & SPECIAL_WAKEUP);
++    }
+ }sbeCntlInstRegMsgHdr_t;
+ 
+ /**
+diff --git a/src/sbefw/core/sbe_sp_intf.H b/src/sbefw/core/sbe_sp_intf.H
+index dd003929..f9ecd1aa 100644
+--- a/src/sbefw/core/sbe_sp_intf.H
++++ b/src/sbefw/core/sbe_sp_intf.H
+@@ -226,6 +226,8 @@ enum sbeSecondaryResponse
+     SBE_SEC_S0_STOP_CLOCK_FAILED              = 0x25,
+     SBE_SEC_S0_CONTINUE_MPIPL_FAILED          = 0x26,
+     SBE_SEC_PERIODIC_IO_TOGGLE_FAILED         = 0x27,
++    SBE_SEC_SPECIAL_WAKEUP_TIMEOUT            = 0x28,
++    SBE_SEC_SPECIAL_WAKEUP_SCOM_FAILURE       = 0x29,
+ };
+ 
+ /**
+@@ -359,12 +361,13 @@ enum sbeSramAccessMode
+ static const uint32_t SBE_MAX_REG_ACCESS_REGS = 64;
+ 
+ /**
+- * @brief Error Mode enum
++ * @brief Error Mode enum - bitmapped fields
+  */
+ enum sbeErrorMode
+ {
+-    EXIT_ON_FIRST_ERROR = 0x0,   // Bail out on first error
++    EXIT_ON_FIRST_ERROR = 0x00,   // Bail out on first error
+     IGNORE_HW_ERRORS    = 0x01,  // Attempt best case
++    SPECIAL_WAKEUP      = 0x02,  // Special wakeup core before stop instruction
+ };
+ 
+ /**
+-- 
+2.11.0
+
