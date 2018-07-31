@@ -1,0 +1,55 @@
+From f07dc81e7c148eaf2e75625d1573722c36d615ac Mon Sep 17 00:00:00 2001
+From: Sachin Gupta <sgupta2m@in.ibm.com>
+Date: Tue, 31 Jul 2018 07:08:49 -0500
+Subject: [PATCH] Test commit to get more traces
+
+Change-Id: I0c558887c414b651debf40ea80d909d16beb3055
+---
+
+diff --git a/src/build/import_hwp_mk/power/istep3/istep3files.mk b/src/build/import_hwp_mk/power/istep3/istep3files.mk
+index a39c07d..22e1fb7 100644
+--- a/src/build/import_hwp_mk/power/istep3/istep3files.mk
++++ b/src/build/import_hwp_mk/power/istep3/istep3files.mk
+@@ -6,6 +6,7 @@
+ # OpenPOWER sbe Project
+ #
+ # Contributors Listed Below - COPYRIGHT 2016,2018
++# [+] International Business Machines Corp.
+ #
+ #
+ # Licensed under the Apache License, Version 2.0 (the "License");
+@@ -50,6 +51,9 @@
+ ISTEP3-CPP-SOURCES +=p9_sbe_setup_boot_freq.C
+ ISTEP3-CPP-SOURCES +=p9_sbe_select_ex.C
+ ISTEP3-CPP-SOURCES +=p9_mmu_scom.C
++ISTEP3-CPP-SOURCES +=p9_adu_setup.C
++ISTEP3-CPP-SOURCES +=p9_adu_coherent_utils.C
++ISTEP3-CPP-SOURCES +=p9_adu_access.C
+ ISTEP3-C-SOURCES =
+ ISTEP3-S-SOURCES =
+ 
+diff --git a/src/build/import_hwp_mk/power/istepcommon/istepcommonfiles.mk b/src/build/import_hwp_mk/power/istepcommon/istepcommonfiles.mk
+index 1808444..cb73e3d 100644
+--- a/src/build/import_hwp_mk/power/istepcommon/istepcommonfiles.mk
++++ b/src/build/import_hwp_mk/power/istepcommon/istepcommonfiles.mk
+@@ -39,9 +39,6 @@
+ ISTEPCOMMON-CPP-SOURCES +=p9_pm_ocb_indir_setup_circular.C
+ ISTEPCOMMON-CPP-SOURCES +=p9_pm_ocb_indir_setup_linear.C
+ ISTEPCOMMON-CPP-SOURCES +=p9_pm_ocb_init.C
+-ISTEPCOMMON-CPP-SOURCES +=p9_adu_setup.C
+-ISTEPCOMMON-CPP-SOURCES +=p9_adu_coherent_utils.C
+-ISTEPCOMMON-CPP-SOURCES +=p9_adu_access.C
+ ISTEPCOMMON-CPP-SOURCES +=p9_ram_core.C
+ #Istep2 Procedure but this is required to run from PIBMEM
+ ISTEPCOMMON-CPP-SOURCES +=p9_sbe_tp_switch_gears.C
+diff --git a/src/sbefw/core/pk_app_cfg.h b/src/sbefw/core/pk_app_cfg.h
+index 9557fed..59802e2 100644
+--- a/src/sbefw/core/pk_app_cfg.h
++++ b/src/sbefw/core/pk_app_cfg.h
+@@ -146,5 +146,5 @@
+ #ifdef PK_TRACE_SZ
+ #undef PK_TRACE_SZ
+ #endif
+-#define PK_TRACE_SZ 128
++#define PK_TRACE_SZ 2*1024
+ #endif /*__PK_APP_CFG_H__*/

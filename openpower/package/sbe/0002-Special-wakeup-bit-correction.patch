@@ -1,0 +1,33 @@
+From e6fa241970133f461c9dc4bc37a18bfc383c55c7 Mon Sep 17 00:00:00 2001
+From: spashabk-in <shakeebbk@in.ibm.com>
+Date: Tue, 31 Jul 2018 06:31:35 -0500
+Subject: [PATCH] Special wakeup bit correction
+
+Change-Id: I25d192ea8cea8de133f85cc0435503503a062028
+Reviewed-on: http://rchgit01.rchland.ibm.com/gerrit1/63606
+Tested-by: Jenkins Server <pfd-jenkins+hostboot@us.ibm.com>
+Reviewed-by: Sachin Gupta <sgupta2m@in.ibm.com>
+---
+ src/sbefw/app/power/sbecmdcntlinst.C | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/src/sbefw/app/power/sbecmdcntlinst.C b/src/sbefw/app/power/sbecmdcntlinst.C
+index 7f05bc31..e918365e 100644
+--- a/src/sbefw/app/power/sbecmdcntlinst.C
++++ b/src/sbefw/app/power/sbecmdcntlinst.C
+@@ -74,10 +74,9 @@ inline bool getWarnCheckFlag(const sbeCntlInstRegMsgHdr_t & i_req)
+     return l_warnCheck;
+ }
+ 
+-static const uint64_t SGPE_ACTIVE = 0x0080000000000000ull;
+-static const uint64_t SPWKUP_ASSERT   = 0x1000000000000000ull;
++static const uint64_t SPWKUP_ASSERT   = 0x8000000000000000ull;
+ static const uint64_t SPWKUP_DEASSERT = 0x0000000000000000ull;
+-static const uint64_t GPMMR_SPWKUP_DONE = 0x1000000000000000ull;
++static const uint64_t GPMMR_SPWKUP_DONE = 0x8000000000000000ull;
+ static const uint32_t SPECIAL_WAKE_UP_POLL_INTERVAL_NS = 1000000;   //1ms
+ static const uint32_t SPECIAL_WAKE_UP_POLL_INTERVAL_SIMICS = 1000000;
+ static const uint32_t SPECIAL_WAKEUP_TIMEOUT_COUNT = 100; // 100 * 1ms
+-- 
+2.11.0
+
